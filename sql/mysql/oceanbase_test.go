@@ -5,6 +5,8 @@
 package mysql
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"ariga.io/atlas/sql/schema"
@@ -160,5 +162,135 @@ func TestOceanBase_FlatModifySchema(t *testing.T) {
 		ms, ok := c.(*schema.ModifySchema)
 		require.True(t, ok, "change %d should be ModifySchema", i)
 		require.Len(t, ms.Changes, 1, "change %d should have exactly 1 sub-change", i)
+	}
+}
+
+func TestOceanBase_PlanChanges(t *testing.T) {
+	db, _, err := newMigrate("5.7.25-OceanBase-v3.2.3")
+	require.NoError(t, err)
+
+	nameCol := schema.NewStringColumn("name", "varchar(255)")
+	users := schema.NewTable("users").
+		AddColumns(
+			schema.NewIntColumn("id", "int"),
+			nameCol,
+		).
+		AddIndexes(
+			schema.NewIndex("idx_name").
+				AddParts(schema.NewColumnPart(nameCol)),
+		)
+
+	changes := []schema.Change{
+		&schema.ModifyTable{
+			T: users,
+			Changes: []schema.Change{
+				&schema.AddColumn{C: schema.NewStringColumn("email", "varchar(255)")},
+				&schema.DropIndex{I: users.Indexes[0]},
+				&schema.DropColumn{C: nameCol},
+				&schema.AddIndex{I: schema.NewIndex("idx_email").
+					AddParts(schema.NewColumnPart(schema.NewStringColumn("email", "varchar(255)")))},
+			},
+		},
+	}
+
+	plan, err := db.PlanChanges(context.Background(), "ob_plan", changes)
+	require.NoError(t, err)
+	// Each sub-change should produce a separate ALTER TABLE statement.
+	require.Len(t, plan.Changes, 4)
+	// Verify each statement is a single ALTER TABLE operation.
+	for _, c := range plan.Changes {
+		require.True(t, strings.HasPrefix(c.Cmd, "ALTER TABLE"), "expected ALTER TABLE, got: %s", c.Cmd)
+	}
+	// Verify ordering: DropIndex (priority 1) and DropColumn (priority 2)
+	// should come before AddColumn (priority 4) and AddIndex (priority 6).
+	require.Contains(t, plan.Changes[0].Cmd, "DROP INDEX")
+	require.Contains(t, plan.Changes[1].Cmd, "DROP COLUMN")
+	require.Contains(t, plan.Changes[2].Cmd, "ADD COLUMN")
+	require.Contains(t, plan.Changes[3].Cmd, "ADD INDEX")
+}
+
+func TestOceanBase_PlanChangesSingleChange(t *testing.T) {
+	db, _, err := newMigrate("5.7.25-OceanBase-v3.2.3")
+	require.NoError(t, err)
+
+	users := schema.NewTable("users").
+		AddColumns(schema.NewIntColumn("id", "int"))
+
+	changes := []schema.Change{
+		&schema.ModifyTable{
+			T: users,
+			Changes: []schema.Change{
+				&schema.AddColumn{C: schema.NewStringColumn("name", "varchar(255)")},
+			},
+		},
+	}
+
+	plan, err := db.PlanChanges(context.Background(), "ob_single", changes)
+	require.NoError(t, err)
+	require.Len(t, plan.Changes, 1)
+	require.Contains(t, plan.Changes[0].Cmd, "ADD COLUMN")
+}
+
+func TestOceanBase_PlanChangesVsMySQL(t *testing.T) {
+	// MySQL should combine changes into a single ALTER TABLE.
+	mysqlDB, _, err := newMigrate("8.0.28")
+	require.NoError(t, err)
+	// OceanBase should split them.
+	obDB, _, err := newMigrate("5.7.25-OceanBase-v3.2.3")
+	require.NoError(t, err)
+
+	users := schema.NewTable("users").
+		AddColumns(
+			schema.NewIntColumn("id", "int"),
+			schema.NewStringColumn("name", "varchar(255)"),
+		)
+
+	changes := []schema.Change{
+		&schema.ModifyTable{
+			T: users,
+			Changes: []schema.Change{
+				&schema.AddColumn{C: schema.NewStringColumn("email", "varchar(255)")},
+				&schema.AddColumn{C: schema.NewStringColumn("phone", "varchar(32)")},
+			},
+		},
+	}
+
+	mysqlPlan, err := mysqlDB.PlanChanges(context.Background(), "mysql_plan", changes)
+	require.NoError(t, err)
+	obPlan, err := obDB.PlanChanges(context.Background(), "ob_plan", changes)
+	require.NoError(t, err)
+
+	// MySQL: one combined ALTER TABLE.
+	require.Len(t, mysqlPlan.Changes, 1)
+	// OceanBase: one ALTER TABLE per change.
+	require.Len(t, obPlan.Changes, 2)
+
+	for _, c := range obPlan.Changes {
+		// Each OceanBase ALTER should have exactly one ADD COLUMN.
+		require.Equal(t, 1, strings.Count(c.Cmd, "ADD COLUMN"),
+			"OceanBase ALTER should contain exactly one operation, got: %s", c.Cmd)
+	}
+}
+
+func TestOceanBase_PlanChangesReversible(t *testing.T) {
+	db, _, err := newMigrate("5.7.25-OceanBase-v3.2.3")
+	require.NoError(t, err)
+
+	users := schema.NewTable("users").
+		AddColumns(schema.NewIntColumn("id", "int"))
+
+	plan, err := db.PlanChanges(context.Background(), "ob_rev", []schema.Change{
+		&schema.ModifyTable{
+			T: users,
+			Changes: []schema.Change{
+				&schema.AddColumn{C: schema.NewStringColumn("a", "varchar(255)")},
+				&schema.AddColumn{C: schema.NewStringColumn("b", "varchar(255)")},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, plan.Reversible)
+	for _, c := range plan.Changes {
+		require.NotEmpty(t, c.Reverse, "each reversible change should have a reverse statement")
 	}
 }

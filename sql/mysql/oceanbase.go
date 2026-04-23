@@ -17,8 +17,10 @@ type (
 	// oplanApply decorates MySQL planApply for OceanBase.
 	oplanApply struct{ planApply }
 	// odiff decorates MySQL diff for OceanBase.
+	// Currently inherits all behavior from the base diff.
 	odiff struct{ diff }
 	// oinspect decorates MySQL inspect for OceanBase.
+	// Currently inherits all behavior from the base inspect.
 	oinspect struct{ inspect }
 )
 
