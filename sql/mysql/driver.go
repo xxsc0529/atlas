@@ -82,20 +82,29 @@ func Open(db schema.ExecQuerier) (migrate.Driver, error) {
 	if err := sqlx.ScanOne(rows, &c.V, &c.collate, &c.charset, &c.lcnames); err != nil {
 		return nil, fmt.Errorf("mysql: scan system variables: %w", err)
 	}
-	if c.TiDB() {
+	switch {
+	case c.TiDB():
 		return &Driver{
 			conn:        c,
 			Differ:      &sqlx.Diff{DiffDriver: &tdiff{diff{conn: c}}},
 			Inspector:   &tinspect{inspect{c}},
 			PlanApplier: &tplanApply{planApply{c}},
 		}, nil
+	case c.OceanBase():
+		return &Driver{
+			conn:        c,
+			Differ:      &sqlx.Diff{DiffDriver: &odiff{diff{conn: c}}},
+			Inspector:   &oinspect{inspect{c}},
+			PlanApplier: &oplanApply{planApply{c}},
+		}, nil
+	default:
+		return &Driver{
+			conn:        c,
+			Differ:      &sqlx.Diff{DiffDriver: &diff{conn: c}},
+			Inspector:   &inspect{c},
+			PlanApplier: &planApply{c},
+		}, nil
 	}
-	return &Driver{
-		conn:        c,
-		Differ:      &sqlx.Diff{DiffDriver: &diff{conn: c}},
-		Inspector:   &inspect{c},
-		PlanApplier: &planApply{c},
-	}, nil
 }
 
 // opener for the given driver name.

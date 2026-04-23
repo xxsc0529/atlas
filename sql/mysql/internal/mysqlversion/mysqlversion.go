@@ -154,6 +154,11 @@ func (v V) TiDB() bool {
 	return strings.Index(string(v), "TiDB") > 0
 }
 
+// OceanBase reports if the MySQL version is OceanBase.
+func (v V) OceanBase() bool {
+	return strings.Index(string(v), "OceanBase") > 0
+}
+
 // Compare returns an integer comparing two versions according to
 // semantic version precedence.
 func (v V) Compare(w string) int {
@@ -163,6 +168,8 @@ func (v V) Compare(w string) int {
 		u = u[:strings.Index(u, "MariaDB")-1]
 	case v.TiDB():
 		u = u[:strings.Index(u, "TiDB")-1]
+	case v.OceanBase():
+		u = u[:strings.Index(u, "OceanBase")-1]
 	case idx > 0:
 		// Remove server build information, if any.
 		u = u[:idx]
