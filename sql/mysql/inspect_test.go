@@ -438,6 +438,35 @@ func TestDriver_InspectTable(t *testing.T) {
 			},
 		},
 		{
+			name:    "oceanbase time precision default",
+			version: "5.7.25-OceanBase-v4.3.5.6",
+			before: func(m mock) {
+				m.tableExists("public", "users", true)
+				m.ExpectQuery(queryColumns).
+					WithArgs("public", "users").
+					WillReturnRows(sqltest.Rows(`
++------------+-------------+--------------+-------------------+-------------+------------+-------------------+--------------------------------+--------------------+----------------+---------------------------+
+| table_name | column_name | column_type  | column_comment    | is_nullable | column_key | column_default    | extra                          | character_set_name | collation_name | generation_expression     |
++------------+-------------+--------------+-------------------+-------------+------------+-------------------+--------------------------------+--------------------+----------------+---------------------------+
+| users      | c1          | datetime(6)  |                   | NO          |            | CURRENT_TIMESTAMP |                                | NULL               | NULL           | NULL                      |
+| users      | c2          | timestamp(6) |                   | NO          |            | CURRENT_TIMESTAMP | on update current_timestamp(6) | NULL               | NULL           | NULL                      |
++------------+-------------+--------------+-------------------+-------------+------------+-------------------+--------------------------------+--------------------+----------------+---------------------------+
+`))
+				m.ExpectQuery(queryIndexes).
+					WillReturnRows(sqlmock.NewRows([]string{"table_name", "index_name", "column_name", "non_unique", "seq_in_index", "index_type", "desc", "index_comment", "sub_part", "expression"}))
+				m.noFKs()
+			},
+			expect: func(require *require.Assertions, t *schema.Table, err error) {
+				p := func(i int) *int { return &i }
+				require.NoError(err)
+				require.Equal("users", t.Name)
+				require.EqualValues([]*schema.Column{
+					{Name: "c1", Type: &schema.ColumnType{Raw: "datetime(6)", Type: &schema.TimeType{T: "datetime", Precision: p(6)}}, Default: &schema.RawExpr{X: "CURRENT_TIMESTAMP(6)"}},
+					{Name: "c2", Type: &schema.ColumnType{Raw: "timestamp(6)", Type: &schema.TimeType{T: "timestamp", Precision: p(6)}}, Default: &schema.RawExpr{X: "CURRENT_TIMESTAMP(6)"}, Attrs: []schema.Attr{&OnUpdate{A: "current_timestamp(6)"}}},
+				}, t.Columns)
+			},
+		},
+		{
 			name: "json type",
 			before: func(m mock) {
 				m.tableExists("public", "users", true)

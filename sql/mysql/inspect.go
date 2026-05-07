@@ -548,6 +548,7 @@ var reCurrTimestamp = regexp.MustCompile(`(?i)^current_timestamp(?:\(\d?\))?$`)
 
 // myDefaultExpr returns the correct schema.Expr based on the column attributes for MySQL.
 func (i *inspect) myDefaultExpr(c *schema.Column, x string, attr *extraAttr) schema.Expr {
+	x = i.obDefaultExpr(c, x)
 	// In MySQL, the DEFAULT_GENERATED indicates the column has an expression default value.
 	if i.SupportsExprDefault() && attr.defaultGenerated {
 		// Skip CURRENT_TIMESTAMP, because wrapping it with parens will translate it to now().
@@ -572,6 +573,26 @@ func (i *inspect) myDefaultExpr(c *schema.Column, x string, attr *extraAttr) sch
 		}
 	}
 	return &schema.Literal{V: quote(x)}
+}
+
+// obDefaultExpr restores CURRENT_TIMESTAMP precision that is omitted by
+// OceanBase in INFORMATION_SCHEMA.COLUMN_DEFAULT for time columns.
+func (i *inspect) obDefaultExpr(c *schema.Column, x string) string {
+	if !i.OceanBase() {
+		return x
+	}
+	t, ok := c.Type.Type.(*schema.TimeType)
+	if !ok || t.Precision == nil || *t.Precision <= 0 {
+		return x
+	}
+	if t.T != TypeDateTime && t.T != TypeTimestamp {
+		return x
+	}
+	v := strings.TrimSpace(x)
+	if !strings.EqualFold(v, currentTS) {
+		return x
+	}
+	return fmt.Sprintf("%s(%d)", v, *t.Precision)
 }
 
 // parseColumn returns column parts, size and signed-info from a MySQL type.
