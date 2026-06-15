@@ -6,14 +6,101 @@ package mysql
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"ariga.io/atlas/sql/internal/sqltest"
+	"ariga.io/atlas/sql/internal/sqlx"
 	"ariga.io/atlas/sql/schema"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 )
+
+func Test_isOBFullTextInternalCol(t *testing.T) {
+	require.True(t, isOBFullTextInternalCol("__doc_id_1780646353769622"))
+	require.True(t, isOBFullTextInternalCol("__word_segment_28_1780646353769652"))
+	require.False(t, isOBFullTextInternalCol("title"))
+	require.False(t, isOBFullTextInternalCol("__other"))
+}
+
+func Test_fullTextIndexColumns(t *testing.T) {
+	create := "CREATE TABLE `it_faq` (" +
+		"`id` bigint NOT NULL," +
+		"FULLTEXT KEY `ft_title` (`title`) WITH PARSER space," +
+		"FULLTEXT INDEX `ft_both` (`title`, `content`)" +
+		")"
+	cols, err := fullTextIndexColumns(create, "ft_title")
+	require.NoError(t, err)
+	require.Equal(t, []string{"title"}, cols)
+	cols, err = fullTextIndexColumns(create, "ft_both")
+	require.NoError(t, err)
+	require.Equal(t, []string{"title", "content"}, cols)
+	_, err = fullTextIndexColumns(create, "missing")
+	require.Error(t, err)
+}
+
+func TestOceanBase_FullTextInspect(t *testing.T) {
+	db, m, err := sqlmock.New()
+	require.NoError(t, err)
+	mk := mock{m}
+	mk.version("5.7.25-OceanBase-v4.3.5.6")
+	mk.ExpectQuery(sqltest.Escape(fmt.Sprintf(schemasQueryArgs, "= ?"))).
+		WithArgs("public").
+		WillReturnRows(sqltest.Rows(`
++-------------+----------------------------+------------------------+
+| SCHEMA_NAME | DEFAULT_CHARACTER_SET_NAME | DEFAULT_COLLATION_NAME |
++-------------+----------------------------+------------------------+
+| public      | utf8mb4                    | utf8mb4_unicode_ci     |
++-------------+----------------------------+------------------------+
+`))
+	mk.tableExists("public", "it_faq", true)
+	mk.ExpectQuery(queryColumns).
+		WithArgs("public", "it_faq").
+		WillReturnRows(sqltest.Rows(`
++------------+-------------+--------------+----------------+-------------+------------+----------------+----------------+--------------------+----------------+---------------------------+
+| TABLE_NAME | COLUMN_NAME | COLUMN_TYPE  | COLUMN_COMMENT | IS_NULLABLE | COLUMN_KEY | COLUMN_DEFAULT | EXTRA          | CHARACTER_SET_NAME | COLLATION_NAME | GENERATION_EXPRESSION     |
++------------+-------------+--------------+----------------+-------------+------------+----------------+----------------+--------------------+----------------+---------------------------+
+| it_faq     | id          | bigint(20)   |                | NO          | PRI        | NULL           |                | NULL               | NULL           | NULL                      |
+| it_faq     | title       | varchar(255) |                | YES         |            | NULL           |                | utf8mb4            | utf8mb4_bin    | NULL                      |
+| it_faq     | content     | text         |                | YES         |            | NULL           |                | utf8mb4            | utf8mb4_bin    | NULL                      |
++------------+-------------+--------------+----------------+-------------+------------+----------------+----------------+--------------------+----------------+---------------------------+
+`))
+	mk.ExpectQuery(queryIndexes).
+		WithArgs("public", "it_faq").
+		WillReturnRows(sqltest.Rows(`
++------------+------------+------------------------------------+------------+--------------+--------------+---------+--------------+------------+------------------+
+| TABLE_NAME | INDEX_NAME | COLUMN_NAME                        | NON_UNIQUE | SEQ_IN_INDEX | INDEX_TYPE   | DESC    | COMMENT      | SUB_PART   | EXPRESSION       |
++------------+------------+------------------------------------+------------+--------------+--------------+---------+--------------+------------+------------------+
+| it_faq     | ft_title   | __doc_id_1780646353769622          |          1 |            1 | FULLTEXT     | 0       |              |       NULL | NULL             |
+| it_faq     | ft_title   | __word_segment_28_1780646353769652 |          1 |            2 | FULLTEXT     | 0       |              |       NULL | NULL             |
+| it_faq     | ft_both    | __doc_id_1781506284092639          |          1 |            2 | FULLTEXT     | 0       |              |       NULL | NULL             |
+| it_faq     | ft_both    | __word_segment_20_1781506284092949 |          1 |            1 | FULLTEXT     | 0       |              |       NULL | NULL             |
++------------+------------+------------------------------------+------------+--------------+--------------+---------+--------------+------------+------------------+
+`))
+	mk.noFKs()
+	mk.ExpectQuery(sqltest.Escape("SHOW CREATE TABLE `public`.`it_faq`")).
+		WillReturnRows(sqlmock.NewRows([]string{"Table", "Create Table"}).
+			AddRow("it_faq", "CREATE TABLE `it_faq` (`id` bigint(20) NOT NULL AUTO_INCREMENT, `title` varchar(255) DEFAULT NULL, `content` text DEFAULT NULL, PRIMARY KEY (`id`), FULLTEXT KEY `ft_title` (`title`) WITH PARSER space, FULLTEXT KEY `ft_both` (`title`, `content`) WITH PARSER space) DEFAULT CHARSET=utf8mb4"))
+	drv, err := Open(db)
+	require.NoError(t, err)
+	s, err := drv.InspectSchema(context.Background(), "public", nil)
+	require.NoError(t, err)
+	require.Len(t, s.Tables, 1)
+	table := s.Tables[0]
+	require.Equal(t, "it_faq", table.Name)
+	ftTitle, ok := table.Index("ft_title")
+	require.True(t, ok)
+	require.True(t, sqlx.Has(ftTitle.Attrs, &IndexType{T: IndexTypeFullText}))
+	require.Len(t, ftTitle.Parts, 1)
+	require.Equal(t, "title", ftTitle.Parts[0].C.Name)
+	ftBoth, ok := table.Index("ft_both")
+	require.True(t, ok)
+	require.Len(t, ftBoth.Parts, 2)
+	require.Equal(t, "title", ftBoth.Parts[0].C.Name)
+	require.Equal(t, "content", ftBoth.Parts[1].C.Name)
+}
 
 func TestOceanBase_DriverSelection(t *testing.T) {
 	db, mk, err := sqlmock.New()

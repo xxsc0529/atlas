@@ -364,6 +364,11 @@ func (i *inspect) addIndexes(s *schema.Schema, rows *sql.Rows) error {
 		case sqlx.ValidString(expr):
 			part.X = &schema.RawExpr{X: unescape(expr.String)}
 		case sqlx.ValidString(column):
+			// OceanBase exposes FULLTEXT internal columns in STATISTICS that
+			// are not listed in COLUMNS. Parts are rebuilt from SHOW CREATE TABLE.
+			if i.OceanBase() && indexType == IndexTypeFullText && isOBFullTextInternalCol(column.String) {
+				continue
+			}
 			part.C, ok = t.Column(column.String)
 			if !ok {
 				return fmt.Errorf("mysql: column %q was not found for index %q", column.String, idx.Name)
@@ -518,6 +523,11 @@ func (i *inspect) showCreate(ctx context.Context, s *schema.Schema) error {
 		c, err := i.createStmt(ctx, t)
 		if err != nil {
 			return err
+		}
+		if i.OceanBase() {
+			if err := st.setFullTextParts(t, c); err != nil {
+				return err
+			}
 		}
 		st.setIndexParser(c)
 		if err := st.setAutoInc(t, c); err != nil {
@@ -949,6 +959,60 @@ func (s *showTable) setAutoInc(t *schema.Table, c *CreateStmt) error {
 	}
 	s.auto.V = v
 	t.Attrs = append(t.Attrs, s.auto)
+	return nil
+}
+
+// isOBFullTextInternalCol reports whether name is an OceanBase internal
+// column exposed by STATISTICS for FULLTEXT indexes.
+func isOBFullTextInternalCol(name string) bool {
+	return strings.HasPrefix(name, "__doc_id_") || strings.HasPrefix(name, "__word_segment_")
+}
+
+// fullTextIndexColumns parses the indexed columns of a FULLTEXT index from
+// a CREATE TABLE statement.
+func fullTextIndexColumns(create, index string) ([]string, error) {
+	re := regexp.MustCompile(`(?i)FULLTEXT\s+(?:KEY|INDEX)\s+` + "`" + regexp.QuoteMeta(index) + "`" + `\s*\(([^)]+)\)`)
+	m := re.FindStringSubmatch(create)
+	if len(m) != 2 {
+		return nil, fmt.Errorf("mysql: FULLTEXT index %q was not found in CREATE TABLE", index)
+	}
+	var cols []string
+	for _, p := range strings.Split(m[1], ",") {
+		p = strings.TrimSpace(p)
+		p = strings.Trim(p, "`")
+		if p == "" {
+			continue
+		}
+		cols = append(cols, p)
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("mysql: FULLTEXT index %q has no columns in CREATE TABLE", index)
+	}
+	return cols, nil
+}
+
+// setFullTextParts rebuilds FULLTEXT index columns from CREATE TABLE.
+// Required for OceanBase where STATISTICS exposes internal columns only.
+func (s *showTable) setFullTextParts(t *schema.Table, c *CreateStmt) error {
+	for _, idx := range s.idxs {
+		cols, err := fullTextIndexColumns(c.S, idx.Name)
+		if err != nil {
+			return err
+		}
+		parts := make([]*schema.IndexPart, 0, len(cols))
+		for i, name := range cols {
+			col, ok := t.Column(name)
+			if !ok {
+				return fmt.Errorf("mysql: column %q was not found for index %q", name, idx.Name)
+			}
+			col.Indexes = append(col.Indexes, idx)
+			parts = append(parts, &schema.IndexPart{
+				SeqNo: i + 1,
+				C:     col,
+			})
+		}
+		idx.Parts = parts
+	}
 	return nil
 }
 
